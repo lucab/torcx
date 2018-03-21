@@ -68,6 +68,7 @@ func NewStoreCache(paths []string) (StoreCache, error) {
 		}
 
 		image := Image{
+			Format:    "tgz",
 			Name:      imageName,
 			Reference: imageRef,
 		}
@@ -117,7 +118,8 @@ func NewStoreCache(paths []string) (StoreCache, error) {
 func (sc *StoreCache) ArchiveFor(im Image) (Archive, error) {
 	for entry, archive := range sc.Images {
 		if im.Name == entry.Name &&
-			im.Reference == entry.Reference {
+			im.Reference == entry.Reference &&
+			im.Format == entry.Format {
 			return archive, nil
 		}
 	}
