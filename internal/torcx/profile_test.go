@@ -95,7 +95,7 @@ func TestPutGetProfileV0(t *testing.T) {
 	}
 }
 
-func TestProfileAddV0(t *testing.T) {
+func TestProfileAdd(t *testing.T) {
 	tmp, err := ioutil.TempFile("", "test-torcx-add-profile")
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +107,7 @@ func TestProfileAddV0(t *testing.T) {
 	}
 
 	testImage := Image{
+		Format:    "tgz",
 		Name:      "testName",
 		Reference: "testRef",
 	}

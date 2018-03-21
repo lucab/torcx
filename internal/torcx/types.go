@@ -76,8 +76,10 @@ type Archive struct {
 
 // Image represents an addon archive within a profile.
 type Image struct {
+	Format    string `json:"format"`
 	Name      string `json:"name"`
 	Reference string `json:"reference"`
+	Remote    string `json:"remote"`
 }
 
 // ToJSONV0 converts an internal Image into ImageV0.
@@ -91,9 +93,35 @@ func (im Image) ToJSONV0() ImageV0 {
 // ImageFromJSONV0 converts an ImageV0 into an internal Image.
 func ImageFromJSONV0(j ImageV0) Image {
 	return Image{
+		Format:    "tgz",
 		Name:      j.Name,
 		Reference: j.Reference,
+		Remote:    "",
 	}
+}
+
+// ToJSONV1 converts an internal Image into ImageV1.
+func (im Image) ToJSONV1() ImageV1 {
+	return ImageV1{
+		Format:    "tgz",
+		Name:      im.Name,
+		Reference: im.Reference,
+		Remote:    "",
+	}
+}
+
+// ImageFromJSONV1 converts an ImageV1 into an internal Image.
+func ImageFromJSONV1(j ImageV1) Image {
+	entry := Image{
+		Format:    j.Format,
+		Name:      j.Name,
+		Reference: j.Reference,
+		Remote:    j.Remote,
+	}
+	if entry.Format == "" {
+		entry.Format = "tgz"
+	}
+	return entry
 }
 
 // ImagesToJSONV0 converts an internal Image list into ImagesV0.
@@ -111,6 +139,26 @@ func ImagesFromJSONV0(j ImagesV0) []Image {
 	result := []Image{}
 	for _, im := range j.Images {
 		entry := ImageFromJSONV0(im)
+		result = append(result, entry)
+	}
+	return result
+}
+
+// ImagesToJSONV1 converts an internal Image list into ImagesV1.
+func ImagesToJSONV1(ims []Image) ImagesV1 {
+	j := ImagesV1{}
+	for _, im := range ims {
+		entry := im.ToJSONV1()
+		j.Images = append(j.Images, entry)
+	}
+	return j
+}
+
+// ImagesFromJSONV1 converts an ImagesV1 into an internal Image list.
+func ImagesFromJSONV1(j ImagesV1) []Image {
+	result := []Image{}
+	for _, im := range j.Images {
+		entry := ImageFromJSONV1(im)
 		result = append(result, entry)
 	}
 	return result
