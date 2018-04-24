@@ -16,50 +16,65 @@ package torcx
 
 import (
 	"bufio"
+	"bytes"
+	"context"
+	_ "crypto/sha512" // used by go-digest
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
+	"net/http"
+	"net/url"
 	"os"
+	"path"
+	"path/filepath"
+	"regexp"
 	"strings"
 
+	"github.com/northbright/ctx/ctxcopy"
+	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/crypto/openpgp"
+	"golang.org/x/crypto/openpgp/clearsign"
 )
 
-// EvaluateURL evaluates the URL template for a remote
+// evaluateURL evaluates the URL template for a remote
 // and performs variables substitution sourcing values from
 // `/etc/os-release`.
-func (r *Remote) EvaluateURL() (string, error) {
+func (r *Remote) evaluateURL() (*url.URL, error) {
 	if r == nil {
-		return "", errors.New("nil Remote")
+		return nil, errors.New("nil Remote")
 	}
 	if r.TemplateURL == "" {
-		return "", errors.New("empty remote URL template")
+		return nil, errors.New("empty remote URL template")
 	}
 
 	vars, any := needSubstitution(r.TemplateURL)
 	if !any {
-		return r.TemplateURL, nil
+		return url.Parse(r.TemplateURL)
 	}
 
 	fp, err := os.Open(OsReleasePath)
 	if err != nil {
-		return "", errors.Wrapf(err, "failed to open %s", OsReleasePath)
+		return nil, errors.Wrapf(err, "failed to open %s", OsReleasePath)
 	}
 	defer fp.Close()
 	osMeta, err := parseOsRelease(fp)
 	if err != nil {
-		return "", errors.Wrapf(err, "failed to parse %s", OsReleasePath)
+		return nil, errors.Wrapf(err, "failed to parse %s", OsReleasePath)
 	}
 
 	// TODO(lucab): this is suboptimal and repetitive
-	url := r.TemplateURL
+	urlRaw := r.TemplateURL
 	if vars.board {
 		key := "COREOS_BOARD"
 		label := fmt.Sprintf("${%s}", key)
 		value := osMeta[key]
 		if value == "" {
-			return "", errors.Errorf("missing required %s value", key)
+			return nil, errors.Errorf("missing required %s value", key)
 		}
-		url = strings.Replace(url, label, value, -1)
+		urlRaw = strings.Replace(urlRaw, label, value, -1)
 
 	}
 	if vars.vendor {
@@ -67,21 +82,66 @@ func (r *Remote) EvaluateURL() (string, error) {
 		label := fmt.Sprintf("${%s}", key)
 		value := osMeta[key]
 		if value == "" {
-			return "", errors.Errorf("missing required %s value", key)
+			return nil, errors.Errorf("missing required %s value", key)
 		}
-		url = strings.Replace(url, label, value, -1)
+		urlRaw = strings.Replace(urlRaw, label, value, -1)
 	}
 	if vars.version {
 		key := "VERSION_ID"
 		label := fmt.Sprintf("${%s}", key)
 		value := osMeta[key]
 		if value == "" {
-			return "", errors.Errorf("missing required %s value", key)
+			return nil, errors.Errorf("missing required %s value", key)
 		}
-		url = strings.Replace(url, label, value, -1)
+		urlRaw = strings.Replace(urlRaw, label, value, -1)
 	}
 
-	return url, nil
+	return url.Parse(urlRaw)
+}
+
+// contentsURL returns the full evaluated URL to the remote contents manifest.
+func (r *Remote) contentsURL() (*url.URL, error) {
+	manifestName, err := url.Parse("torcx_remote_contents.json.asc")
+	if err != nil {
+		return nil, err
+	}
+	baseURL, err := r.evaluateURL()
+	if err != nil {
+		return nil, err
+	}
+	fullURL := baseURL.ResolveReference(manifestName)
+	return fullURL, nil
+}
+
+// loadKeyrings loads all keyrings referenced by a remote manifest.
+// `baseDir` is used as the path prefix to find the keyrings by filename.
+func (r *Remote) loadKeyrings(baseDir string) ([]openpgp.KeyRing, error) {
+	if baseDir == "" {
+		return nil, errors.New("empty base directory")
+	}
+	if r == nil {
+		return nil, errors.New("nil Remote")
+	}
+	if r.TemplateURL == "" {
+		return nil, errors.New("empty remote URL template")
+	}
+
+	keyrings := []openpgp.KeyRing{}
+	for _, k := range r.ArmoredKeys {
+		path := filepath.Join(baseDir, k)
+		fp, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer fp.Close()
+		el, err := openpgp.ReadArmoredKeyRing(fp)
+		if err != nil {
+			return nil, err
+		}
+		keyrings = append(keyrings, el)
+	}
+
+	return keyrings, nil
 }
 
 // subs describes which variables need to be substituted
@@ -141,4 +201,329 @@ func parseOsRelease(rd io.Reader) (map[string]string, error) {
 		return meta, sc.Err()
 	}
 	return meta, nil
+}
+
+// RemotesCache holds a temporary cache for images/references in the store
+type RemotesCache struct {
+	Paths    map[string]string
+	Configs  map[string]Remote
+	Contents map[string]RemoteContents
+}
+
+// NewRemotesCache constructs a new RemotesCache
+func NewRemotesCache(ctx context.Context, baseDirs []string, remotesFilter []string) (*RemotesCache, error) {
+	rc := RemotesCache{
+		Paths:    map[string]string{},
+		Configs:  map[string]Remote{},
+		Contents: map[string]RemoteContents{},
+	}
+
+	// Process all remote base directories and cache all remotes found.
+	for _, dir := range baseDirs {
+		glob := filepath.Join(dir, "*", "remote.json")
+		matches, err := filepath.Glob(glob)
+		if err != nil {
+			return nil, err
+		}
+		re, err := regexp.Compile(fmt.Sprintf(`^%s/(.*)/remote\.json$`, dir))
+		if err != nil {
+			return nil, err
+		}
+		for _, remote := range matches {
+			groups := re.FindStringSubmatch(remote)
+			if len(groups) != 2 {
+				return nil, errors.Errorf("non-unique matches: %s", groups)
+			}
+			if groups[1] == "" {
+				continue
+			}
+			name := groups[1]
+			rc.Paths[name] = remote
+		}
+	}
+
+	// Only keep relevant remotes for this cache.
+	filtered := map[string]string{}
+	for _, name := range remotesFilter {
+		if path, ok := rc.Paths[name]; ok && path != "" {
+			filtered[name] = path
+		}
+	}
+	if len(remotesFilter) > 0 {
+		rc.Paths = filtered
+	}
+
+	// Download and verify remote manifests.
+	for name, path := range rc.Paths {
+		fp, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer fp.Close()
+		bufrd := bufio.NewReader(fp)
+		var jm RemoteManifestV0JSON
+		if err := json.NewDecoder(bufrd).Decode(&jm); err != nil {
+			return nil, errors.Wrapf(err, "failed to decode %s", name)
+		}
+		if jm.Kind != RemoteManifestV0K {
+			return nil, errors.Errorf("invalid manifest kind: %s", jm.Kind)
+		}
+		remote := RemoteFromJSONV0(jm.Value)
+		rc.Configs[name] = remote
+		url, err := remote.contentsURL()
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to evaluate URL for %s", name)
+		}
+		keyrings, err := remote.loadKeyrings(filepath.Dir(path))
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to load keyrings for %s", name)
+		}
+		manifest, err := fetchManifest(ctx, url.String())
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to fetch contents manifest for %s", name)
+		}
+		unwrapped, err := verifyManifest(manifest, keyrings)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to verify contents manifest for %s", name)
+		}
+		contents, err := decodeContents(unwrapped)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to decode contents for %s", name)
+		}
+		rc.Contents[name] = *contents
+
+		logrus.WithFields(logrus.Fields{
+			"name": name,
+			"path": path,
+			"url":  url,
+		}).Debug("remote verified")
+	}
+
+	// Length sanity check.
+	if len(rc.Paths) != len(rc.Configs) || len(rc.Paths) != len(rc.Contents) {
+		return nil, errors.Errorf("length mismatch, %d vs %d vs %d", len(rc.Paths), len(rc.Configs), len(rc.Contents))
+	}
+
+	return &rc, nil
+}
+
+// CheckAvailable checks if a given Image is available in the configured remote.
+// On success, it returns the full evaluated base URL for the remote plus and
+// the relative image location.
+func (rc *RemotesCache) CheckAvailable(im Image) (*url.URL, string, string, error) {
+	if im.Remote == "" {
+		return nil, "", "", nil
+	}
+	if rc == nil {
+		return nil, "", "", errors.New("nil RemotesCache")
+	}
+
+	contents, ok := rc.Contents[im.Remote]
+	if !ok {
+		return nil, "", "", errors.Errorf("manifest for remote %s not found: %s", im.Remote, rc)
+	}
+	config, ok := rc.Configs[im.Remote]
+	if !ok {
+		return nil, "", "", errors.Errorf("manifest for remote %s not found: %s", im.Remote, rc)
+	}
+	baseURL, err := config.evaluateURL()
+	if err != nil {
+		return nil, "", "", errors.Wrapf(err, "failed to evaluate URL for %s", im.Remote)
+	}
+	location, hash, err := contents.CheckAvailable(im)
+	if err != nil {
+		return nil, "", "", errors.Wrapf(err, "inspecting remote %s", im.Remote)
+	}
+	if location == "" {
+		return nil, "", "", nil
+	}
+
+	return baseURL, location, hash, nil
+}
+
+func verifyManifest(manifest string, keyrings []openpgp.KeyRing) (string, error) {
+	if manifest == "" {
+		return "", errors.New("empty manifest")
+	}
+	if len(keyrings) <= 0 {
+		return "", errors.New("no keys to verify manifest")
+	}
+
+	signedBlock, trailer := clearsign.Decode([]byte(manifest))
+	if signedBlock == nil {
+		return "", errors.New("no signed manifest detected")
+	}
+	if len(trailer) != 0 {
+		return "", errors.New("trailing data after signed manifest")
+	}
+	if signedBlock.ArmoredSignature == nil {
+		return "", errors.New("no clearsign data to verify")
+	}
+	if len(signedBlock.Plaintext) <= 0 {
+		return "", errors.New("no plaintext to verify")
+	}
+
+	for _, kr := range keyrings {
+		if _, err := openpgp.CheckDetachedSignature(kr, bytes.NewReader(signedBlock.Bytes), signedBlock.ArmoredSignature.Body); err == nil {
+			return string(signedBlock.Plaintext), nil
+		}
+	}
+
+	return "", errors.New("unable to verify contents manifest")
+}
+
+func fetchManifest(ctx context.Context, urlRaw string) (string, error) {
+	var manifest bytes.Buffer
+	req, err := http.NewRequest("GET", urlRaw, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 32*1024)
+	if err := ctxcopy.Copy(ctx, &manifest, resp.Body, buf); err != nil {
+		return "", err
+	}
+	return manifest.String(), nil
+}
+
+func decodeContents(manifest string) (*RemoteContents, error) {
+	rd := strings.NewReader(manifest)
+	bufrd := bufio.NewReader(rd)
+	var container kindValueJSON
+	if err := json.NewDecoder(bufrd).Decode(&container); err != nil {
+		return nil, errors.Wrap(err, "failed to decode manifest")
+	}
+
+	switch container.Kind {
+	case RemoteContentsV1K:
+		manifest := RemoteContentsV1JSON{
+			Kind: container.Kind,
+		}
+		if err := json.Unmarshal(container.Value, &manifest.Value); err != nil {
+			return nil, err
+		}
+		value := RemoteContentsFromJSONV1(manifest.Value)
+		return &value, nil
+	}
+
+	return nil, errors.Errorf("invalid manifest kind: %s", container.Kind)
+}
+
+// CheckAvailable checks if a given Image is available in the configured remote.
+// On success, it returns its location (anchored at `base_url`).
+func (rcs *RemoteContents) CheckAvailable(im Image) (string, string, error) {
+	if im.Remote == "" {
+		return "", "", nil
+	}
+	if rcs == nil {
+		return "", "", errors.New("nil RemoteContents")
+	}
+
+	ri, ok := rcs.Images[im.Name]
+	if !ok {
+		return "", "", errors.Errorf("image %s not found", im.Name)
+	}
+	targetVersion := im.Reference
+	if targetVersion == DefaultTagRef {
+		targetVersion = ri.DefaultVersion
+	}
+	for _, vers := range ri.Versions {
+		if vers.Version == targetVersion {
+			// TODO(lucab): handle typed locations
+			location := vers.locations[0]
+			return location, vers.Hash, nil
+		}
+
+	}
+
+	return "", "", errors.Errorf("image %s:%s not found", im.Name, im.Reference)
+}
+
+// FetchImage downloads an image from a remote.
+func (rc *RemotesCache) FetchImage(ctx context.Context, baseURL *url.URL, location string, baseDir string, hash string) error {
+	fileName := path.Base(location)
+	if !strings.HasSuffix(fileName, ".torcx.tgz") {
+		return errors.Errorf("invalid extension for image archive %s", fileName)
+	}
+	targetPath := filepath.Join(baseDir, fileName)
+	locationURL, err := url.Parse("./" + location)
+	if err != nil {
+		return err
+	}
+	tmpFile, err := ioutil.TempFile(baseDir, ".fetchimg")
+	if err != nil {
+		return err
+	}
+	tmpName := tmpFile.Name()
+	//	defer os.Remove(tmpName)
+	defer tmpFile.Close()
+	bufwr := bufio.NewWriter(tmpFile)
+	defer bufwr.Flush()
+
+	fullURL := baseURL.ResolveReference(locationURL)
+	req, err := http.NewRequest("GET", fullURL.String(), nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 32*1024)
+	if err := ctxcopy.Copy(ctx, bufwr, resp.Body, buf); err != nil {
+		return err
+	}
+	if err := bufwr.Flush(); err != nil {
+		return errors.Wrapf(err, "failed to flush %s", tmpName)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return errors.Wrapf(err, "failed to close %s", tmpName)
+	}
+	if err := os.Chmod(tmpName, 0755); err != nil {
+		return errors.Wrapf(err, "failed to chmod %s", tmpName)
+	}
+
+	if hash != "" {
+		valid, err := validateHash(tmpName, hash)
+		if err != nil {
+			return errors.Wrapf(err, "failed to validate %s", targetPath)
+		}
+		if !valid {
+			return errors.Errorf("mismatching hash for %s", targetPath)
+		}
+	}
+	if err := os.Rename(tmpName, targetPath); err != nil {
+		return errors.Wrapf(err, "failed to save %s", targetPath)
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"path": targetPath,
+	}).Debug("image fetched")
+	return nil
+}
+
+func validateHash(path string, hash string) (bool, error) {
+	fp, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer fp.Close()
+	d, err := digest.Parse(strings.Replace(hash, "-", ":", 1))
+	if err != nil {
+		return false, errors.Wrap(err, "could not understand package hash")
+	}
+
+	verifier := d.Verifier()
+	if _, err := io.Copy(verifier, bufio.NewReader(fp)); err != nil {
+		return false, errors.Wrap(err, "could not read file for hash validation")
+	}
+
+	return verifier.Verified(), nil
 }

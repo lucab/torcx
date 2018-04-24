@@ -89,6 +89,18 @@ func (cc *CommonConfig) NextProfile() string {
 	return filepath.Join(cc.ConfDir, "next-profile")
 }
 
+// RemotesDirs returns the list of directories where we look for remotes manifests.
+func (cc *CommonConfig) RemotesDirs() []string {
+	dirs := []string{
+		VendorRemotesDir,
+		OemRemotesDir,
+	}
+	if cc != nil {
+		dirs = append(dirs, filepath.Join(cc.ConfDir, "remotes"))
+	}
+	return dirs
+}
+
 // ArchiveFilename is the filename (no directory) for the archive of an image.
 func (im *Image) ArchiveFilename() string {
 	return fmt.Sprintf("%s:%s.torcx.tgz", im.Name, im.Reference)
