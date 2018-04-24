@@ -16,12 +16,13 @@ package cli
 
 import (
 	"fmt"
+	"strconv"
 
+	"github.com/coreos/torcx/internal/torcx"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-
-	"github.com/coreos/torcx/internal/torcx"
+	"github.com/spf13/viper"
 )
 
 var (
@@ -32,9 +33,10 @@ var (
 		RunE:  runProfileCheck,
 	}
 
-	flagProfileCheckName      string
-	flagProfileCheckPath      string
-	flagProfileCheckOsVersion string
+	flagProfileCheckName           string
+	flagProfileCheckPath           string
+	flagProfileCheckOsVersion      string
+	flagProfileCheckSkipRemoteless string
 )
 
 func init() {
@@ -42,10 +44,28 @@ func init() {
 	cmdProfileCheck.Flags().StringVar(&flagProfileCheckName, "name", "", "profile name to check")
 	cmdProfileCheck.Flags().StringVar(&flagProfileCheckPath, "file", "", "profile file to check")
 	cmdProfileCheck.Flags().StringVarP(&flagProfileCheckOsVersion, "os-release", "n", "", "override OS version")
+	cmdProfileCheck.Flags().StringVar(&flagProfileCheckSkipRemoteless, "skip-remoteless", "", "allow missing remoteless packages")
+}
+
+func flagSkipRemoteless() bool {
+	skip := false
+	env, ok := viper.Get("SKIP_REMOTELESS").(string)
+	if ok && env != "" {
+		if value, err := strconv.ParseBool(env); err == nil {
+			skip = value
+		}
+	}
+	if flagProfileCheckSkipRemoteless != "" {
+		if value, err := strconv.ParseBool(flagProfileCheckSkipRemoteless); err == nil {
+			skip = value
+		}
+	}
+	return skip
 }
 
 func runProfileCheck(cmd *cobra.Command, args []string) error {
 	var err error
+	checkSkipRemoteless := flagSkipRemoteless()
 
 	commonCfg, err := fillCommonRuntime(flagProfileCheckOsVersion)
 	if err != nil {
@@ -101,18 +121,28 @@ func runProfileCheck(cmd *cobra.Command, args []string) error {
 
 	missing := false
 	for _, im := range profile {
+		if im.Remote == "" && checkSkipRemoteless {
+			logrus.WithFields(logrus.Fields{
+				"name":       im.Name,
+				"references": im.Reference,
+				"remote":     im.Remote,
+			}).Debug("skipping remoteless image")
+			continue
+		}
 		ar, err := storeCache.ArchiveFor(im)
 		if err != nil {
 			missing = true
 			logrus.WithFields(logrus.Fields{
 				"name":      im.Name,
 				"reference": im.Reference,
+				"remote":    im.Remote,
 			}).Error("image/reference not found")
 		} else {
 			logrus.WithFields(logrus.Fields{
 				"name":         im.Name,
 				"references":   im.Reference,
 				"archive path": ar.Filepath,
+				"remote":       im.Remote,
 			}).Debug("image/reference found")
 		}
 	}
