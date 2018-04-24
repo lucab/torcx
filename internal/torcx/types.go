@@ -196,6 +196,59 @@ func RemoteFromJSONV0(j RemoteV0) Remote {
 	return res
 }
 
+// RemoteContents holds contents metadata for a remote manifest.
+type RemoteContents struct {
+	Images map[string]RemoteImage
+}
+
+// RemoteContentsFromJSONV1 translates a RemoteImagesV1 to an internal Remote.
+func RemoteContentsFromJSONV1(j RemoteImagesV1) RemoteContents {
+	var res RemoteContents
+
+	images := map[string]RemoteImage{}
+	for _, im := range j.Images {
+		if im.Name == "" {
+			continue
+		}
+		tmpVersions := []RemoteVersion{}
+		for _, v := range im.Versions {
+			tmpVersions = append(tmpVersions, RemoteVersionFromJSONV1(v))
+		}
+		tmpImage := RemoteImage{
+			Name:           im.Name,
+			DefaultVersion: im.DefaultVersion,
+			Versions:       tmpVersions,
+		}
+		images[im.Name] = tmpImage
+	}
+	res.Images = images
+
+	return res
+}
+
+type RemoteImage struct {
+	DefaultVersion string
+	Name           string
+	Versions       []RemoteVersion
+}
+
+type RemoteVersion struct {
+	Version       string
+	Hash          string
+	sourcePackage string
+	locations     []string
+}
+
+// RemoteVersionFromJSONV1 translates a RemoteVersionV1 to an internal RemoteVersion.
+func RemoteVersionFromJSONV1(j RemoteVersionV1) RemoteVersion {
+	remoteVer := RemoteVersion{
+		Hash:      j.Hash,
+		Version:   j.Version,
+		locations: j.Locations,
+	}
+	return remoteVer
+}
+
 // kindValueJSON holds a generic, typed, kind-value JSON manifest.
 type kindValueJSON struct {
 	Kind  string          `json:"kind"`
