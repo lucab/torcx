@@ -58,7 +58,8 @@ func runImageList(cmd *cobra.Command, args []string) error {
 
 	storePaths := commonCfg.StorePaths
 	if flagImageListOsVersion != "" {
-		osRelease, err := torcx.CurrentOsVersionID(torcx.OsReleasePath)
+		path := torcx.VendorOsReleasePath("/usr")
+		osRelease, err := torcx.CurrentOsVersionID(path)
 		if err != nil {
 			osRelease = ""
 		}

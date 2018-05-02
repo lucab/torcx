@@ -140,7 +140,7 @@ func FilterStoreVersions(paths []string, curVersion string, filterVersion string
 	retPaths := make([]string, 0, len(paths))
 	for _, p := range paths {
 		// filter unversioned vendor store
-		if filepath.Clean(p) != filepath.Clean(VendorStoreDir) {
+		if filepath.Clean(p) != filepath.Clean(VendorStoreDir("")) {
 			retPaths = append(retPaths, p)
 		}
 	}

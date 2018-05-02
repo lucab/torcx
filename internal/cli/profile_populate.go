@@ -122,7 +122,7 @@ func runProfilePopulate(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	remotesCache, err := torcx.NewRemotesCache(ctx, commonCfg.RemotesDirs(), remotes)
+	remotesCache, err := torcx.NewRemotesCache(ctx, commonCfg.UsrDir, commonCfg.RemotesDirs(), remotes)
 	if err != nil {
 		return err
 	}
@@ -150,10 +150,18 @@ func runProfilePopulate(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// TODO(lucab): parallelize this
-		if err := remotesCache.FetchImage(ctx, baseURL, location, versionedStore, hash); err != nil {
-			return errors.Wrapf(err, "failed to fetch %s:%s from %s", im.Name, im.Reference, im.Remote)
+		switch baseURL.Scheme {
+		case "file":
+			continue
+		case "https", "http":
+			// TODO(lucab): parallelize this
+			if err := remotesCache.FetchImage(ctx, baseURL, location, versionedStore, hash); err != nil {
+				return errors.Wrapf(err, "failed to fetch %s:%s from %s", im.Name, im.Reference, im.Remote)
+			}
+		default:
+			errors.Errorf("unsupported scheme while trying to fetch %s", baseURL.String())
 		}
+
 		remoteCount++
 	}
 

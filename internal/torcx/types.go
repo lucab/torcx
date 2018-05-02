@@ -46,6 +46,7 @@ type ConfigV0 struct {
 type CommonConfig struct {
 	BaseDir    string   `json:"base_dir,omitempty"`
 	RunDir     string   `json:"run_dir,omitempty"`
+	UsrDir     string   `json:"usr_dir,omitempty"`
 	ConfDir    string   `json:"conf_dir,omitempty"`
 	StorePaths []string `json:"store_paths,omitempty"`
 }

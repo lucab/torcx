@@ -42,7 +42,7 @@ import (
 // evaluateURL evaluates the URL template for a remote
 // and performs variables substitution sourcing values from
 // `/etc/os-release`.
-func (r *Remote) evaluateURL() (*url.URL, error) {
+func (r *Remote) evaluateURL(usrMountpoint string) (*url.URL, error) {
 	if r == nil {
 		return nil, errors.New("nil Remote")
 	}
@@ -55,15 +55,17 @@ func (r *Remote) evaluateURL() (*url.URL, error) {
 		return url.Parse(r.TemplateURL)
 	}
 
-	fp, err := os.Open(OsReleasePath)
+	osReleasePath := VendorOsReleasePath(usrMountpoint)
+	fp, err := os.Open(osReleasePath)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to open %s", OsReleasePath)
+		return nil, errors.Wrapf(err, "failed to open %s", osReleasePath)
 	}
 	defer fp.Close()
 	osMeta, err := parseOsRelease(fp)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to parse %s", OsReleasePath)
+		return nil, errors.Wrapf(err, "failed to parse %s", osReleasePath)
 	}
+	osMeta["COREOS_USR"] = usrMountpoint
 
 	// TODO(lucab): this is suboptimal and repetitive
 	urlRaw := r.TemplateURL
@@ -76,6 +78,15 @@ func (r *Remote) evaluateURL() (*url.URL, error) {
 		}
 		urlRaw = strings.Replace(urlRaw, label, value, -1)
 
+	}
+	if vars.usr {
+		key := "COREOS_USR"
+		label := fmt.Sprintf("${%s}", key)
+		value := osMeta[key]
+		if value == "" {
+			return nil, errors.Errorf("missing required %s value", key)
+		}
+		urlRaw = strings.Replace(urlRaw, label, value, -1)
 	}
 	if vars.vendor {
 		key := "ID"
@@ -100,12 +111,12 @@ func (r *Remote) evaluateURL() (*url.URL, error) {
 }
 
 // contentsURL returns the full evaluated URL to the remote contents manifest.
-func (r *Remote) contentsURL() (*url.URL, error) {
+func (r *Remote) contentsURL(usrMountpoint string) (*url.URL, error) {
 	manifestName, err := url.Parse("torcx_remote_contents.json.asc")
 	if err != nil {
 		return nil, err
 	}
-	baseURL, err := r.evaluateURL()
+	baseURL, err := r.evaluateURL(usrMountpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +159,7 @@ func (r *Remote) loadKeyrings(baseDir string) ([]openpgp.KeyRing, error) {
 // in a URL template.
 type subs struct {
 	board   bool
+	usr     bool
 	vendor  bool
 	version bool
 }
@@ -160,6 +172,10 @@ func needSubstitution(template string) (subs, bool) {
 
 	if strings.Contains(template, "${COREOS_BOARD}") {
 		vars.board = true
+		any = true
+	}
+	if strings.Contains(template, "${COREOS_USR}") {
+		vars.usr = true
 		any = true
 	}
 	if strings.Contains(template, "${VERSION_ID}") {
@@ -205,17 +221,19 @@ func parseOsRelease(rd io.Reader) (map[string]string, error) {
 
 // RemotesCache holds a temporary cache for images/references in the store
 type RemotesCache struct {
-	Paths    map[string]string
-	Configs  map[string]Remote
-	Contents map[string]RemoteContents
+	UsrMountpoint string
+	Paths         map[string]string
+	Configs       map[string]Remote
+	Contents      map[string]RemoteContents
 }
 
 // NewRemotesCache constructs a new RemotesCache
-func NewRemotesCache(ctx context.Context, baseDirs []string, remotesFilter []string) (*RemotesCache, error) {
+func NewRemotesCache(ctx context.Context, usrMountpoint string, baseDirs []string, remotesFilter []string) (*RemotesCache, error) {
 	rc := RemotesCache{
-		Paths:    map[string]string{},
-		Configs:  map[string]Remote{},
-		Contents: map[string]RemoteContents{},
+		UsrMountpoint: usrMountpoint,
+		Paths:         map[string]string{},
+		Configs:       map[string]Remote{},
+		Contents:      map[string]RemoteContents{},
 	}
 
 	// Process all remote base directories and cache all remotes found.
@@ -270,7 +288,7 @@ func NewRemotesCache(ctx context.Context, baseDirs []string, remotesFilter []str
 		}
 		remote := RemoteFromJSONV0(jm.Value)
 		rc.Configs[name] = remote
-		url, err := remote.contentsURL()
+		url, err := remote.contentsURL(rc.UsrMountpoint)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to evaluate URL for %s", name)
 		}
@@ -278,10 +296,25 @@ func NewRemotesCache(ctx context.Context, baseDirs []string, remotesFilter []str
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to load keyrings for %s", name)
 		}
-		manifest, err := fetchManifest(ctx, url.String())
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to fetch contents manifest for %s", name)
+		var manifest string
+		switch url.Scheme {
+		case "https":
+			var err error
+			manifest, err = fetchManifest(ctx, url.String())
+			if err != nil {
+				return nil, errors.Wrapf(err, "failed to fetch contents manifest for %s", name)
+			}
+		case "file":
+			path := strings.TrimPrefix(url.String(), "file://")
+			b, err := ioutil.ReadFile(filepath.Clean(path))
+			if err != nil {
+				return nil, errors.Wrapf(err, "failed to fetch contents manifest for %s", name)
+			}
+			manifest = string(b)
+		default:
+			return nil, errors.Errorf("unsupported scheme %s", url.Scheme)
 		}
+
 		unwrapped, err := verifyManifest(manifest, keyrings)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to verify contents manifest for %s", name)
@@ -326,7 +359,7 @@ func (rc *RemotesCache) CheckAvailable(im Image) (*url.URL, string, string, erro
 	if !ok {
 		return nil, "", "", errors.Errorf("manifest for remote %s not found: %s", im.Remote, rc)
 	}
-	baseURL, err := config.evaluateURL()
+	baseURL, err := config.evaluateURL(rc.UsrMountpoint)
 	if err != nil {
 		return nil, "", "", errors.Wrapf(err, "failed to evaluate URL for %s", im.Remote)
 	}
@@ -460,7 +493,7 @@ func (rc *RemotesCache) FetchImage(ctx context.Context, baseURL *url.URL, locati
 		return err
 	}
 	tmpName := tmpFile.Name()
-	//	defer os.Remove(tmpName)
+	defer os.Remove(tmpName)
 	defer tmpFile.Close()
 	bufwr := bufio.NewWriter(tmpFile)
 	defer bufwr.Flush()

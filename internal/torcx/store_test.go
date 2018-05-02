@@ -37,14 +37,14 @@ func TestFilterStoreVersion(t *testing.T) {
 		},
 		{
 			"matching version",
-			[]string{VendorStoreDir},
+			[]string{VendorStoreDir("/usr")},
 			"1.0.0",
 			"1.0.0",
-			[]string{VendorStoreDir},
+			[]string{VendorStoreDir("/usr")},
 		},
 		{
 			"non-matching version",
-			[]string{VendorStoreDir},
+			[]string{VendorStoreDir("/usr")},
 			"1.0.0",
 			"2.0.0",
 			[]string{},

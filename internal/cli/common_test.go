@@ -22,7 +22,7 @@ import (
 )
 
 func TestFillCommon(t *testing.T) {
-	vendorStore := "/usr/share/torcx/store/"
+	vendorStore := "/usr/share/torcx/store"
 	tests := []struct {
 		desc string
 
@@ -87,11 +87,11 @@ func TestStorePaths(t *testing.T) {
 	}
 
 	expectedStorePaths := []string{
-		"/usr/share/torcx/store/",
-		"/usr/share/oem/torcx/store/999.9/",
-		"/usr/share/oem/torcx/store/",
-		"/var/lib/torcx/store/999.9/",
-		"/var/lib/torcx/store/",
+		"/usr/share/torcx/store",
+		"/usr/share/oem/torcx/store/999.9",
+		"/usr/share/oem/torcx/store",
+		"/var/lib/torcx/store/999.9",
+		"/var/lib/torcx/store",
 	}
 
 	if !reflect.DeepEqual(cfg.StorePaths, expectedStorePaths) {

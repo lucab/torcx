@@ -33,10 +33,9 @@ var (
 		RunE:  runProfileCheck,
 	}
 
-	flagProfileCheckName           string
-	flagProfileCheckPath           string
-	flagProfileCheckOsVersion      string
-	flagProfileCheckSkipRemoteless string
+	flagProfileCheckName      string
+	flagProfileCheckPath      string
+	flagProfileCheckOsVersion string
 )
 
 func init() {
@@ -44,28 +43,17 @@ func init() {
 	cmdProfileCheck.Flags().StringVar(&flagProfileCheckName, "name", "", "profile name to check")
 	cmdProfileCheck.Flags().StringVar(&flagProfileCheckPath, "file", "", "profile file to check")
 	cmdProfileCheck.Flags().StringVarP(&flagProfileCheckOsVersion, "os-release", "n", "", "override OS version")
-	cmdProfileCheck.Flags().StringVar(&flagProfileCheckSkipRemoteless, "skip-remoteless", "", "allow missing remoteless packages")
-}
-
-func flagSkipRemoteless() bool {
-	skip := false
-	env, ok := viper.Get("SKIP_REMOTELESS").(string)
-	if ok && env != "" {
-		if value, err := strconv.ParseBool(env); err == nil {
-			skip = value
-		}
-	}
-	if flagProfileCheckSkipRemoteless != "" {
-		if value, err := strconv.ParseBool(flagProfileCheckSkipRemoteless); err == nil {
-			skip = value
-		}
-	}
-	return skip
 }
 
 func runProfileCheck(cmd *cobra.Command, args []string) error {
 	var err error
-	checkSkipRemoteless := flagSkipRemoteless()
+	skipRemoteless := false
+	env, ok := viper.Get("SKIP_REMOTELESS").(string)
+	if ok && env != "" {
+		if value, err := strconv.ParseBool(env); err == nil {
+			skipRemoteless = value
+		}
+	}
 
 	commonCfg, err := fillCommonRuntime(flagProfileCheckOsVersion)
 	if err != nil {
@@ -121,7 +109,7 @@ func runProfileCheck(cmd *cobra.Command, args []string) error {
 
 	missing := false
 	for _, im := range profile {
-		if im.Remote == "" && checkSkipRemoteless {
+		if im.Remote == "" && skipRemoteless {
 			logrus.WithFields(logrus.Fields{
 				"name":       im.Name,
 				"references": im.Reference,
