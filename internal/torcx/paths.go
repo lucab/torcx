@@ -105,6 +105,18 @@ func (cc *CommonConfig) NextProfile() string {
 	return filepath.Join(cc.ConfDir, "next-profile")
 }
 
+// RemotesDirs returns the list of directories where we look for remotes manifests.
+func (cc *CommonConfig) RemotesDirs() []string {
+	dirs := []string{
+		VendorRemotesDir(cc.UsrDir),
+		OemRemotesDir,
+	}
+	if cc != nil {
+		dirs = append(dirs, filepath.Join(cc.ConfDir, "remotes"))
+	}
+	return dirs
+}
+
 // VendorOsReleasePath returns the path to vendor os-release file
 // for the specific OS partition mounted at `usrMountpoint`.
 func VendorOsReleasePath(usrMountpoint string) string {
